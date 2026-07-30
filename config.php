@@ -266,7 +266,7 @@ function reinitialiserMotDePasseAdmin(int $idAdminCourant, int $idCible, string 
 // effectif même en changeant de session.
 
 define('LOGIN_MAX_TENTATIVES', 5);
-define('LOGIN_VERROU_SECONDES', 5);
+define('LOGIN_VERROU_SECONDES', 20);
 
 /**
  * Adresse IP du visiteur. Ne fait volontairement pas confiance aux en-têtes
@@ -285,9 +285,23 @@ function getClientIp(): string
 function enregistrerEchecConnexion(string $identifiant, string $adresseIp): void
 {
     $pdo = getDB();
+    // Correction : l'horodatage est désormais posé explicitement avec
+    // l'horloge PHP (date('Y-m-d H:i:s')) plutôt que de laisser MySQL le
+    // remplir tout seul (DEFAULT CURRENT_TIMESTAMP). Si le fuseau horaire de
+    // PHP (date.timezone dans php.ini) et celui du serveur MySQL diffèrent,
+    // ce qui est un cas fréquent sous XAMPP, la comparaison entre l'heure
+    // stockée et time() dans estVerrouille()/secondesAvantDeverrouillage()
+    // devient fausse — un verrou de 5 ou 10 secondes pouvait ainsi se
+    // traduire, en pratique, par plusieurs milliers de secondes d'attente.
+    // En écrivant nous-mêmes l'heure avec la même horloge que celle utilisée
+    // pour la relire, ce décalage disparaît complètement.
     $pdo->prepare(
-        "INSERT INTO login_attempts (identifiant, adresse_ip) VALUES (:identifiant, :ip)"
-    )->execute([':identifiant' => $identifiant, ':ip' => $adresseIp]);
+        "INSERT INTO login_attempts (identifiant, adresse_ip, date_tentative) VALUES (:identifiant, :ip, :date_tentative)"
+    )->execute([
+        ':identifiant'     => $identifiant,
+        ':ip'              => $adresseIp,
+        ':date_tentative'  => date('Y-m-d H:i:s'),
+    ]);
 
     // Ménage occasionnel des anciennes tentatives (plus d'un jour) pour éviter
     // que la table ne grossisse indéfiniment. Peu coûteux vu le volume attendu.
@@ -345,7 +359,10 @@ function secondesAvantDeverrouillage(string $identifiant, string $adresseIp): in
         return 0;
     }
 
-    $finVerrou = strtotime($ligne['date_tentative']) + 5; // 5 secondes
+    // Correction : utilise la constante LOGIN_VERROU_SECONDES plutôt qu'un
+    // nombre codé en dur, pour n'avoir qu'un seul endroit à modifier si la
+    // durée du verrou change à nouveau.
+    $finVerrou = strtotime($ligne['date_tentative']) + LOGIN_VERROU_SECONDES;
     return max(0, $finVerrou - time());
 }
 
