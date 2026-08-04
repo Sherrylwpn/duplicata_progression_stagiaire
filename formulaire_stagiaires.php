@@ -551,6 +551,14 @@ function renderStarInput(string $name, int $max, int $value): string
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title><?= $idEdition ? 'Modifier le stagiaire' : 'Nouveau stagiaire' ?></title>
   <link rel="stylesheet" href="style.css">
+  <style>
+    /* Illustration de badge, ajoutée à côté du nom dans la colonne Badges
+       (cf. demande d'ajout des illustrations) : icône ronde de petite taille,
+       alignée avec le texte, sans casser la mise en page existante des .skill-item. */
+    .skill-name-badge { display: inline-flex; align-items: center; gap: 8px; }
+    .badge-icon { border-radius: 50%; object-fit: cover; flex-shrink: 0; }
+    .print-badge-icon { border-radius: 50%; object-fit: cover; vertical-align: middle; margin-right: 6px; }
+  </style>
   <?php if ($aDesGraphiquesAImprimer): ?>
   <!-- Chart.js n'est chargé que si la fiche imprimable aura au moins un graphique
        à afficher (mêmes conditions que dans evolution.php). Fichier hébergé en
@@ -622,8 +630,19 @@ function renderStarInput(string $name, int $max, int $value): string
               <input type="date" name="date_fin" value="<?= htmlspecialchars($stagiaireData['date_fin'] ?? '') ?>">
             </div>
           </div>
+
+          <?php if (!$idEdition): ?>
+          <!-- En création, seules les informations générales sont saisissables :
+               la notation (compétences, badges, note, commentaire) n'a de sens
+               qu'une fois le stage créé, donc uniquement disponible en modification
+               (cf. demande : créer d'abord, noter/modifier ensuite uniquement). -->
+          <div class="fiche-form-actions" style="margin-top:20px;">
+            <button type="submit" form="ficheForm" class="submit-btn">Enregistrer le stagiaire</button>
+          </div>
+          <?php endif; ?>
         </section>
 
+        <?php if ($idEdition): ?>
         <!-- Colonne 2 : Compétences techniques -->
         <section class="form-col">
           <h3>Compétences techniques</h3>
@@ -667,9 +686,15 @@ function renderStarInput(string $name, int $max, int $value): string
           <div class="skill-list">
             <?php foreach ($badges as $badgeItem):
               $val = $notesBadgeExistantes[(int) $badgeItem['id_badge']] ?? 0;
+              $imgBadge = urlImageBadge($badgeItem['nom']);
             ?>
               <div class="skill-item">
-                <span class="skill-name"><?= htmlspecialchars($badgeItem['nom']) ?></span>
+                <span class="skill-name skill-name-badge">
+                  <?php if ($imgBadge): ?>
+                    <img src="<?= htmlspecialchars($imgBadge) ?>" alt="" class="badge-icon" width="28" height="28">
+                  <?php endif; ?>
+                  <?= htmlspecialchars($badgeItem['nom']) ?>
+                </span>
                 <?= renderStarInput('badge[' . (int) $badgeItem['id_badge'] . ']', 3, $val) ?>
               </div>
             <?php endforeach; ?>
@@ -697,17 +722,21 @@ function renderStarInput(string $name, int $max, int $value): string
           </div>
 
           <div class="fiche-form-actions">
-            <?php if ($idEdition && $aDesEvaluations): ?>
+            <?php if ($aDesEvaluations): ?>
               <a href="evolution.php?id=<?= (int) $idEdition ?>" class="submit-btn submit-btn-secondary">Voir l'évolution</a>
             <?php endif; ?>
-            <?php if ($idEdition): ?>
-              <button type="button" id="btnImprimerFiche" class="submit-btn submit-btn-secondary">🖨️ Imprimer la fiche du stagiaire</button>
+            <?php if (!empty($stagiaireData['date_debut']) && !empty($stagiaireData['date_fin'])): ?>
+              <!-- Comparatif avec les autres stagiaires dont la période se chevauche
+                   (cf. demande de comparaison "même période"). Nécessite les deux
+                   dates renseignées, sinon aucun chevauchement n'est calculable. -->
+              <a href="comparatif.php?id=<?= (int) $idEdition ?>" class="submit-btn submit-btn-secondary">📊 Comparer avec la période</a>
             <?php endif; ?>
-            <button type="submit" form="ficheForm" class="submit-btn">
-              <?= $idEdition ? 'Enregistrer les modifications' : 'Enregistrer le stagiaire' ?>
-            </button>
+            <button type="button" id="btnImprimerFiche" class="submit-btn submit-btn-secondary">🖨️ Imprimer la fiche du stagiaire</button>
+            <button type="submit" form="ficheForm" class="submit-btn">Enregistrer les modifications</button>
           </div>
         </section>
+
+        <?php endif; // fin des colonnes 2-4, réservées à la modification ?>
 
       </div>
     </form>
@@ -783,7 +812,15 @@ function renderStarInput(string $name, int $max, int $value): string
         <h2>Badges obtenus</h2>
         <div class="print-badges">
           <?php foreach ($notesBadgeExistantes as $id => $niveau): ?>
-            <span class="print-badge">🏅 <?= htmlspecialchars($nomsBadge[$id] ?? ('#' . $id)) ?> <small>(<?= (int) $niveau ?>/3)</small></span>
+            <?php $imgBadgeImpression = urlImageBadge($nomsBadge[$id] ?? ''); ?>
+            <span class="print-badge">
+              <?php if ($imgBadgeImpression): ?>
+                <img src="<?= htmlspecialchars($imgBadgeImpression) ?>" alt="" class="print-badge-icon" width="20" height="20">
+              <?php else: ?>
+                🏅
+              <?php endif; ?>
+              <?= htmlspecialchars($nomsBadge[$id] ?? ('#' . $id)) ?> <small>(<?= (int) $niveau ?>/3)</small>
+            </span>
           <?php endforeach; ?>
         </div>
       </section>

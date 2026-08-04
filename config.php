@@ -456,6 +456,162 @@ function calculerEvolutionStage(PDO $pdo, int $idStage, array $nomsTech, array $
     ];
 }
 
+// ── Illustrations des badges ──
+
+/**
+ * Convertit le nom d'un badge en "slug" de fichier (minuscules, sans accents,
+ * espaces/apostrophes remplacés par des tirets) pour retrouver son illustration
+ * dans le dossier badges/. Ex. : "Support et GLPI" → "support-et-glpi".
+ */
+function sluggifierNomBadge(string $nom): string
+{
+    $nom = mb_strtolower(trim($nom));
+    // Translittère les caractères accentués (é, è, ê... → e) avant de nettoyer.
+    $nom = iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $nom) ?: $nom;
+    $nom = preg_replace('/[^a-z0-9]+/', '-', $nom);
+    return trim($nom, '-');
+}
+
+/**
+ * Retourne le chemin (relatif, pour un <img src="...">) de l'illustration
+ * associée à un badge, ou null si aucun fichier ne correspond. Les images
+ * doivent être placées dans le dossier badges/ à la racine de l'application,
+ * nommées d'après sluggifierNomBadge() (ex. badges/support-et-glpi.png).
+ */
+function urlImageBadge(string $nomBadge): ?string
+{
+    static $extensions = ['png', 'svg', 'jpg', 'jpeg', 'webp'];
+    $slug = sluggifierNomBadge($nomBadge);
+    foreach ($extensions as $ext) {
+        $chemin = __DIR__ . "/badges/{$slug}.{$ext}";
+        if (is_file($chemin)) {
+            return "badges/{$slug}.{$ext}";
+        }
+    }
+    return null;
+}
+
+// ── Score global d'un stage (note + compétences + badges combinés) ──
+//
+// Sert au comparatif par période (comparatif.php) : un score unique par
+// stagiaire, sur 100, calculé à partir de la DERNIÈRE séance d'évaluation
+// connue. Les 4 composantes (note globale, compétences techniques,
+// compétences humaines, badges) pèsent chacune le même poids : le score est
+// la moyenne simple des composantes disponibles (une composante jamais notée
+// n'est pas comptée à zéro, elle est simplement exclue de la moyenne, pour ne
+// pas pénaliser un stagiaire dont l'évaluateur n'a pas encore rempli telle
+// catégorie). Pondération volontairement égale pour l'instant ; ajustable
+// plus tard si besoin de favoriser une composante en particulier.
+
+/**
+ * Calcule le score global (/100) d'un stage à partir de sa dernière séance
+ * d'évaluation. Retourne null si le stage n'a encore aucune évaluation.
+ *
+ * @return array{score: float, note: ?float, pctTech: ?float, pctHumaine: ?float, pctBadge: ?float}|null
+ */
+function calculerScoreGlobalStage(PDO $pdo, int $idStage, int $totalTech, int $totalHumaine, int $totalBadge): ?array
+{
+    $stmt = $pdo->prepare(
+        "SELECT id_evaluation, note FROM evaluation WHERE id_stage = ? ORDER BY date_evaluation DESC, id_evaluation DESC LIMIT 1"
+    );
+    $stmt->execute([$idStage]);
+    $derniere = $stmt->fetch();
+    if (!$derniere) {
+        return null;
+    }
+
+    $idEval = (int) $derniere['id_evaluation'];
+    $note   = $derniere['note'] !== null ? (float) $derniere['note'] : null;
+
+    $sommeNiveaux = function (string $table) use ($pdo, $idEval): int {
+        $stmt = $pdo->prepare("SELECT COALESCE(SUM(niveau), 0) FROM {$table} WHERE id_evaluation = ?");
+        $stmt->execute([$idEval]);
+        return (int) $stmt->fetchColumn();
+    };
+
+    $pctNote    = $note !== null ? ($note / 20 * 100) : null;
+    $pctTech    = $totalTech > 0 ? ($sommeNiveaux('evaluation_competence_technique') / ($totalTech * 3) * 100) : null;
+    $pctHumaine = $totalHumaine > 0 ? ($sommeNiveaux('evaluation_competence_humaine') / ($totalHumaine * 5) * 100) : null;
+    $pctBadge   = $totalBadge > 0 ? ($sommeNiveaux('evaluation_badge') / ($totalBadge * 3) * 100) : null;
+
+    $composantes = array_filter([$pctNote, $pctTech, $pctHumaine, $pctBadge], fn($v) => $v !== null);
+    if (empty($composantes)) {
+        return null;
+    }
+
+    return [
+        'score'      => round(array_sum($composantes) / count($composantes), 1),
+        'note'       => $note,
+        'pctTech'    => $pctTech !== null ? round($pctTech, 1) : null,
+        'pctHumaine' => $pctHumaine !== null ? round($pctHumaine, 1) : null,
+        'pctBadge'   => $pctBadge !== null ? round($pctBadge, 1) : null,
+    ];
+}
+
+/**
+ * Retourne l'historique de la note globale d'un stage, séance par séance
+ * (dans l'ordre chronologique), SANS filtrer les valeurs stables (contrairement
+ * à calculerEvolutionStage) : utile pour comparatif.php, où l'on veut pouvoir
+ * superposer la courbe de plusieurs stagiaires même si l'un d'eux n'a qu'une
+ * note qui n'a jamais changé.
+ *
+ * @return float[] valeurs (null = séance sans note), indexées 0..n-1
+ */
+function recupererHistoriqueNoteStage(PDO $pdo, int $idStage): array
+{
+    $stmt = $pdo->prepare(
+        "SELECT note FROM evaluation WHERE id_stage = ? ORDER BY date_evaluation ASC, id_evaluation ASC"
+    );
+    $stmt->execute([$idStage]);
+    return array_map(
+        fn($v) => $v !== null ? (float) $v : null,
+        array_column($stmt->fetchAll(), 'note')
+    );
+}
+
+/**
+ * Trouve tous les stages dont la période (date_debut → date_fin) chevauche
+ * celle du stage donné, lui-même inclus (pour le classer parmi ses pairs).
+ * Un stage sans date de début ET de fin renseignées ne peut être comparé à
+ * aucun autre : il est exclu du résultat (y compris s'il s'agit du stage de
+ * référence, auquel cas la fonction retourne un tableau vide).
+ *
+ * Chevauchement classique de deux intervalles : début_A <= fin_B ET début_B <= fin_A.
+ *
+ * @return array<int, array> lignes stage+stagiaire, triées par date_debut
+ */
+function trouverStagesMemePeriode(PDO $pdo, int $idStage): array
+{
+    $stmt = $pdo->prepare(
+        "SELECT date_debut, date_fin FROM stage WHERE id_stage = ?"
+    );
+    $stmt->execute([$idStage]);
+    $reference = $stmt->fetch();
+
+    if (!$reference || empty($reference['date_debut']) || empty($reference['date_fin'])) {
+        return [];
+    }
+
+    $stmt = $pdo->prepare(
+        "SELECT st.id_stage, st.id_classe, st.id_etablissement, st.date_debut, st.date_fin,
+                s.nom, s.prenom,
+                c.nom AS classe, e.nom AS etablissement
+         FROM stage st
+         JOIN stagiaire s ON s.id_stagiaire = st.id_stagiaire
+         JOIN classe_ref c ON c.id_classe = st.id_classe
+         JOIN etablissement_ref e ON e.id_etablissement = st.id_etablissement
+         WHERE st.date_debut IS NOT NULL AND st.date_fin IS NOT NULL
+           AND st.date_debut <= :refFin AND st.date_fin >= :refDebut
+         ORDER BY st.date_debut ASC, s.nom ASC, s.prenom ASC"
+    );
+    $stmt->execute([
+        ':refFin'    => $reference['date_fin'],
+        ':refDebut'  => $reference['date_debut'],
+    ]);
+
+    return $stmt->fetchAll();
+}
+
 // ── Archivage des stages ──
 //
 // Un stage archivé n'apparaît plus dans la liste principale (index.php) mais
